@@ -8,7 +8,7 @@
 data/cartwheel.db
 
 # Local conversation state and scenario/replay run outputs.
-.sessions.db
+.sessions.db*
 scenarios/results/
 replay/results/
 
@@ -18,3 +18,6 @@ __pycache__/
 .venv/
 .pytest_cache/
 scenarios/demo_pilot_gt.json
+
+# Local HW progress note (not a submission file)
+.hw1-progress.md
