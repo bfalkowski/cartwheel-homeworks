@@ -21,9 +21,11 @@ from __future__ import annotations
 from typing import Any
 
 from agent import db
-from agent.auth import AuthContext, can_cancel_order, permission_denied
+from agent.auth import AuthContext, can_cancel_order, can_view_order, permission_denied
+from agent.config import load_facts
 from agent.helpcenter import load_policy_docs
 from agent.killswitch import kill_switch
+from seed.eligibility import effective_return_window_days, is_refund_eligible
 
 MAX_SEARCH_LIMIT = 25
 DEFAULT_ORDER_LIMIT = 20
@@ -330,3 +332,86 @@ def find_order(ctx: AuthContext, query: str) -> dict[str, Any]:
         if needle in titles.get(order.product_id, "").lower()
     ]
     return {"ok": True, "orders": matches[:FIND_ORDER_MATCH_LIMIT]}
+
+
+def get_return_eligibility(ctx: AuthContext, order_id: int) -> dict[str, Any]:
+    """Explain whether an order can currently be returned, and why. Risk tier: read.
+
+    get_order and issue_refund only expose a bare `refund_eligible` boolean.
+    The model has no other way to know today's date or the applicable return
+    window, so it cannot explain *why* an order is or is not eligible without
+    guessing. This tool does that arithmetic and states the reason in plain
+    language, so the agent can answer a return question without speculating.
+
+    Access rules: same scope as get_order (agent.auth.can_view_order).
+
+    Args:
+        ctx: The caller's auth context.
+        order_id: The order to check.
+
+    Returns:
+        On success: {"ok": True, "order_id": int, "eligible": bool,
+        "status": str, "delivered_at": str | None, "as_of": str,
+        "return_window_days": int, "days_since_delivery": int | None,
+        "policy_id": str, "reason": str}.
+        If no order has this id: {"ok": False, "error": "not_found", ...}.
+        If the caller cannot view the order: agent.auth.permission_denied(...).
+
+    Implementation notes:
+        Uses seed.eligibility.is_refund_eligible and
+        effective_return_window_days as the ground truth -- the same oracle
+        the seed script and issue_refund trust -- so this tool cannot
+        disagree with them. agent.db.world_asof(conn) supplies "today".
+    """
+    with db.connection() as conn:
+        order = db.get_order(conn, order_id)
+        if order is None:
+            return {"ok": False, "error": "not_found", "reason": f"no order #{order_id}"}
+        if not can_view_order(ctx, order.user_id, order.store_id):
+            return permission_denied(
+                f"role {ctx.role!r} (user {ctx.user_id}) may not view order #{order_id}"
+            )
+        store = db.get_store(conn, order.store_id)
+        as_of = db.world_asof(conn)
+        facts = load_facts()
+
+    window = effective_return_window_days(
+        facts["return_window_days"],
+        store.return_window_days_override if store else None,
+    )
+    is_override = bool(store and store.return_window_days_override is not None)
+    policy_id = f"store-{store.slug}-policy" if is_override else "cw-returns"
+
+    eligible = is_refund_eligible(
+        status=order.status,
+        delivered_at=order.delivered_at,
+        as_of=as_of,
+        return_window_days=window,
+    )
+    days_since = (as_of - order.delivered_at).days if order.delivered_at else None
+
+    if order.status != "delivered":
+        reason = f"order status is {order.status!r}; only a delivered order can be returned"
+    elif eligible:
+        reason = (
+            f"delivered {order.delivered_at.isoformat()}, {days_since} day(s) ago; "
+            f"within the {window}-day return window"
+        )
+    else:
+        reason = (
+            f"delivered {order.delivered_at.isoformat()}, {days_since} day(s) ago; "
+            f"past the {window}-day return window"
+        )
+
+    return {
+        "ok": True,
+        "order_id": order_id,
+        "eligible": eligible,
+        "status": order.status,
+        "delivered_at": order.delivered_at.isoformat() if order.delivered_at else None,
+        "as_of": as_of.isoformat(),
+        "return_window_days": window,
+        "days_since_delivery": days_since,
+        "policy_id": policy_id,
+        "reason": reason,
+    }

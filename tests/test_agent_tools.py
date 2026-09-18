@@ -93,3 +93,40 @@ def test_refund_respects_scope(world_copy: Path) -> None:
     result = issue_refund_logic(SHOPPER_2, 4127, 84.0, "not my order")
     assert result["ok"] is False
     assert result["error"] == "permission_denied"
+
+
+# ---------------------------------------------------------------------------
+# get_return_eligibility (our own tool, added in HW1 Part A after Case 2
+# showed the agent guessing at why an order was refund-ineligible: get_order
+# only exposes a bare boolean, and the model has no other way to know
+# today's date or the applicable window).
+# ---------------------------------------------------------------------------
+
+
+def test_return_eligibility_explains_an_in_window_order() -> None:
+    from agent.tools import get_return_eligibility
+
+    result = get_return_eligibility(SHOPPER_1, 4127)
+    assert result["ok"] is True
+    assert result["eligible"] is True
+    assert result["return_window_days"] == 30
+    assert result["policy_id"] == "cw-returns"
+    assert "within" in result["reason"]
+
+
+def test_return_eligibility_explains_an_out_of_window_order() -> None:
+    from agent.tools import get_return_eligibility
+
+    result = get_return_eligibility(SHOPPER_1, 3980)
+    assert result["ok"] is True
+    assert result["eligible"] is False
+    assert result["days_since_delivery"] == 45
+    assert "past the 30-day return window" in result["reason"]
+
+
+def test_return_eligibility_respects_scope() -> None:
+    from agent.tools import get_return_eligibility
+
+    result = get_return_eligibility(SHOPPER_2, 4127)
+    assert result["ok"] is False
+    assert result["error"] == "permission_denied"
